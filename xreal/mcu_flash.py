@@ -45,6 +45,7 @@ sys.path.insert(0, str(HERE))
 
 import hid
 from air import build_mcu as air_build
+from air2 import build_beam_audio_switch, build_beam_cover_handoff
 from air2 import build_mcu as air2_build
 
 
@@ -153,6 +154,51 @@ KNOWN_IMAGES = {
     ),
     air2_build.IMMEDIATE_DP_SHA256.lower(): KnownImage(
         "Air 2 Pro experimental immediate DP-first audio", frozenset({"air2pro"})
+    ),
+    air2_build.AUDIO_TRACE_SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental bridge audio trace", frozenset({"air2pro"})
+    ),
+    air2_build.AUDIO_IDLE_TRACE_SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental audio idle trace", frozenset({"air2pro"})
+    ),
+    air2_build.AUDIO_TIMED_TRACE_SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental timed amplifier trace", frozenset({"air2pro"})
+    ),
+    air2_build.AUDIO_CLOCK_MUTE_SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental I2S clock mute", frozenset({"air2pro"})
+    ),
+    air2_build.AUDIO_EDGE_TRACE_SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental amplifier edge trace", frozenset({"air2pro"})
+    ),
+    air2_build.AUDIO_BRIDGE_TRACE_SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental synchronized receiver and amplifier trace", frozenset({"air2pro"})
+    ),
+    air2_build.USB_TO_DP_ON_HOLD_SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental USB-to-DP switching on hold", frozenset({"air2pro"})
+    ),
+    air2_build.USB_TO_DP_STABLE_HOLD_SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental USB-to-DP with a stable hold timer", frozenset({"air2pro"})
+    ),
+    air2_build.AUDIO_ROUTE_BUTTONS_SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental dedicated audio route buttons", frozenset({"air2pro"})
+    ),
+    air2_build.AUDIO_ROUTE_BUTTONS_V2_SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental dedicated audio route buttons v2", frozenset({"air2pro"})
+    ),
+    build_beam_audio_switch.MCU_SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental Beam audio switch without DP retraining", frozenset({"air2pro"})
+    ),
+    build_beam_audio_switch.NO_RETRAIN_MCU_SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental Beam audio switches without retraining in either direction", frozenset({"air2pro"})
+    ),
+    build_beam_cover_handoff.SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental Beam DP-to-USB OLED cover handoff", frozenset({"air2pro"})
+    ),
+    build_beam_cover_handoff.REVERSE_SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental Beam cover handoff in both directions", frozenset({"air2pro"})
+    ),
+    build_beam_cover_handoff.USB_RETRAIN_SHA256.lower(): KnownImage(
+        "Air 2 Pro experimental Beam cover handoff with DP-to-USB retrain", frozenset({"air2pro"})
     ),
 }
 
@@ -551,7 +597,24 @@ def flash(image: bytes, info: ImageInfo, initial: Connection) -> None:
     try:
         version = _read_returned_app(initial, 15.0)
     except (OSError, RuntimeError):
-        if info.sha256 not in (air2_build.DP_FIRST_SHA256.lower(), air2_build.IMMEDIATE_DP_SHA256.lower()):
+        if info.sha256 not in (
+            air2_build.DP_FIRST_SHA256.lower(), air2_build.IMMEDIATE_DP_SHA256.lower(),
+            air2_build.AUDIO_TRACE_SHA256.lower(),
+            air2_build.AUDIO_IDLE_TRACE_SHA256.lower(),
+            air2_build.AUDIO_TIMED_TRACE_SHA256.lower(),
+            air2_build.AUDIO_CLOCK_MUTE_SHA256.lower(),
+            air2_build.AUDIO_EDGE_TRACE_SHA256.lower(),
+            air2_build.AUDIO_BRIDGE_TRACE_SHA256.lower(),
+            air2_build.USB_TO_DP_ON_HOLD_SHA256.lower(),
+            air2_build.USB_TO_DP_STABLE_HOLD_SHA256.lower(),
+            air2_build.AUDIO_ROUTE_BUTTONS_SHA256.lower(),
+            air2_build.AUDIO_ROUTE_BUTTONS_V2_SHA256.lower(),
+            build_beam_audio_switch.MCU_SHA256.lower(),
+            build_beam_audio_switch.NO_RETRAIN_MCU_SHA256.lower(),
+            build_beam_cover_handoff.SHA256.lower(),
+            build_beam_cover_handoff.REVERSE_SHA256.lower(),
+            build_beam_cover_handoff.USB_RETRAIN_SHA256.lower(),
+        ):
             raise
         print("Transfer finished. If DP audio is active, hold Brightness + for four seconds")
         print("and release to restore USB. Keep this pair connected. Waiting for APP again.")
@@ -597,6 +660,18 @@ def self_test() -> None:
     assert KNOWN_IMAGES[air_build.OUTPUT_SHA256.lower()].models == frozenset({"air"})
     assert KNOWN_IMAGES[air2_build.DP_FIRST_SHA256.lower()].models == frozenset({"air2pro"})
     assert KNOWN_IMAGES[air2_build.IMMEDIATE_DP_SHA256.lower()].models == frozenset({"air2pro"})
+    assert KNOWN_IMAGES[air2_build.AUDIO_TRACE_SHA256.lower()].models == frozenset({"air2pro"})
+    assert KNOWN_IMAGES[air2_build.AUDIO_IDLE_TRACE_SHA256.lower()].models == frozenset({"air2pro"})
+    assert KNOWN_IMAGES[air2_build.AUDIO_TIMED_TRACE_SHA256.lower()].models == frozenset({"air2pro"})
+    assert KNOWN_IMAGES[air2_build.AUDIO_CLOCK_MUTE_SHA256.lower()].models == frozenset({"air2pro"})
+    assert KNOWN_IMAGES[air2_build.AUDIO_EDGE_TRACE_SHA256.lower()].models == frozenset({"air2pro"})
+    assert KNOWN_IMAGES[air2_build.AUDIO_BRIDGE_TRACE_SHA256.lower()].models == frozenset({"air2pro"})
+    assert KNOWN_IMAGES[air2_build.USB_TO_DP_ON_HOLD_SHA256.lower()].models == frozenset({"air2pro"})
+    assert KNOWN_IMAGES[air2_build.USB_TO_DP_STABLE_HOLD_SHA256.lower()].models == frozenset({"air2pro"})
+    assert KNOWN_IMAGES[air2_build.AUDIO_ROUTE_BUTTONS_SHA256.lower()].models == frozenset({"air2pro"})
+    assert KNOWN_IMAGES[air2_build.AUDIO_ROUTE_BUTTONS_V2_SHA256.lower()].models == frozenset({"air2pro"})
+    assert KNOWN_IMAGES[build_beam_audio_switch.MCU_SHA256.lower()].models == frozenset({"air2pro"})
+    assert KNOWN_IMAGES[build_beam_audio_switch.NO_RETRAIN_MCU_SHA256.lower()].models == frozenset({"air2pro"})
     assert _counts(24, 153_888) == (3664, 3665)
     assert _counts(64, 151_160) == (3598, 3599)
     assert len(cmd_build(PREPARE)) == 64

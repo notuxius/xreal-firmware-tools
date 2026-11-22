@@ -38,6 +38,16 @@ DP_FIRST_SHA256 = "39819E2083911E59AEA844EE484DB52DE8B5B0C9A49BD7EC317DF80F7BD52
 DP_FIRST_CRC = 0x29CB1C30
 IMMEDIATE_DP_SHA256 = "DCF383BE0684FB0EBC6126CA1AD031594DB4D77F9B16BE6D5C248EA69F5769ED"
 IMMEDIATE_DP_CRC = 0xCEE99416
+AUDIO_TRACE_SHA256 = "EDBEE02A2EE78CCBA432CFBF23ACB9DB6AE8A6A2A1BA3904DA701E0A97828518"
+AUDIO_IDLE_TRACE_SHA256 = "9A7AB98387AE707DC5073C85100222736F1BB7BD50AECDEAE6698700E68C445D"
+AUDIO_TIMED_TRACE_SHA256 = "57024EF0A763A21C15E1512D142C06F8CDCF0C7D611ECBEEE51A6135A0E1A40C"
+AUDIO_CLOCK_MUTE_SHA256 = "E066A851855F1B8D645EF4C2A304C08EEEED24F2B4939FD91456B6E36D9B3182"
+AUDIO_EDGE_TRACE_SHA256 = "3AC0F42784683D234EE4AFE723C44A81BDDE2B9AB12CE24D11A32F4D8F817BF1"
+AUDIO_BRIDGE_TRACE_SHA256 = "E6AC383940C92D87D7F9C26D967FC3B45ECC9EE093215AEBBB80E806B84CDD38"
+USB_TO_DP_ON_HOLD_SHA256 = "EC5D6D7859FDD9E1B16CCFA46DBFFEE03FBC8501E2F079167219975E8F70EE69"
+USB_TO_DP_STABLE_HOLD_SHA256 = "4FEFFE2C771F5EDAED83BDF166BB2878E897DBEE1AE1896EEBBAB0B74C587ABC"
+AUDIO_ROUTE_BUTTONS_SHA256 = "77ABB1AF8C1D329A1D6DABD3A92AEBD7952839896BA5682FED1DEC5E9D880FBF"
+AUDIO_ROUTE_BUTTONS_V2_SHA256 = "E07A5BA17E3A3565B3ACC2457164F2D0B0265736FD5613854BC79F0B2EF2C404"
 
 EXPECT_LENGTH = 0x24E70
 EXPECT_PROJECT = 0x0900
@@ -281,6 +291,379 @@ def build_dp_first(baseline: bytes, *, immediate: bool = False) -> bytes:
     return image
 
 
+# File offsets in the tested Air 2 Pro image. The top 128 bytes of the
+# original stack are reserved for the trace in both stack-top declarations.
+AUDIO_TRACE_RAM = 0x2001C528
+AUDIO_TRACE_CODE = 0x1DD20
+AUDIO_TRACE_INIT = AUDIO_TRACE_CODE
+AUDIO_TRACE_POLL = 0x1DEB0
+AUDIO_TRACE_READ = 0x1DE5E
+
+AUDIO_TRACE_HELPER = hx(
+    # Initialize the trace and tail-call the stock startup routine.
+    "594800210c2202c0013afcd1564857490160f5f7fbbe"
+    # Call the original poll. Sample in DP mode every 250 ms or on a mode edge.
+    "2de9f041e5f701fa524c5348817801296ad10579e9f77fff064694f82800a842"
+    "04d1e06a301ab0f57a7f5dd384f82850e6622779002d0cbf04f1080804f12008"
+    # Record 16-bit milliseconds, I2C success mask, B9, C67C, E2EB, D423, D424.
+    "b008a8f8000088f8035000254cf27c6000f04cf888f8040045ea1025"
+    "4ef2eb2000f044f888f80500000a45ea40054df2234000f03bf888f80600000a"
+    "45ea80054df2244000f032f888f80700000a45eac00588f80250"
+    # Restore page E0. Preserve the last 2D sample and first, settled, latest 3D.
+    "ff20e021e7f706fe98f8030018b90127002060711ce06079ff2838bf01306071"
+    "17f0020f06d1d8e90001c4e90401266347f0020717f0040f0ad1206b301a"
+    "b0f5fa5f05d3d8e90001c4e9060147f004072771bde8f081"
+    # Checked I2C read with the stock bus helper. Return 0x100 | byte on success.
+    "10b584b0c4b2010aff20e7f7d8fd90b90020039003a800900123019332200290"
+    "144843212246e9f764ff20b99df80c0040f4807000e0002004b010bd"
+    # Reserved op 0x2B with A7 AD returns exactly 40 RAM bytes. Other requests
+    # tail-call the stock unsupported-command handler.
+    "2b2c10d10278a72a0dd14278ad2a0ad128220a80054911f8013b00f8013b013a"
+    "f9d100207047edf770b828c50120415452317a03002000100840"
+)
+# Preserve the latest MCU SmartPA state for each video mode in header bytes 6–7.
+AUDIO_TRACE_AMP_HELPER = hx(
+    "08b5fff740ff06488178012906d1017901f00101034a12780348425408bd00bf"
+    "7a0300204f0e00202ec50120"
+)
+AUDIO_TRACE_RECORDS: tuple[Record, ...] = (
+    ("reserve trace RAM in vector stack top", 0x40, hx("a8c50120"), hx("28c50120")),
+    ("reserve trace RAM in C runtime stack top", 0x2C8, hx("a8c50120"), hx("28c50120")),
+    ("initialize trace at application startup", 0x1161A, hx("02f087fa"), hx("0cf081fb")),
+    ("sample DP audio in the first display loop", 0x034A4, hx("fff74cfe"), hx("1af004fd")),
+    ("sample DP audio in the second display loop", 0x038DC, hx("fff730fc"), hx("1af0e8fa")),
+    ("hook reserved-command dispatcher", 0x0DFFC, hx("fcf7b4ff"), hx("0ff02fff")),
+    ("capture and read four DP audio samples", AUDIO_TRACE_CODE,
+     bytes(len(AUDIO_TRACE_HELPER)), AUDIO_TRACE_HELPER),
+    ("sample MCU SmartPA state", AUDIO_TRACE_POLL,
+     bytes(len(AUDIO_TRACE_AMP_HELPER)), AUDIO_TRACE_AMP_HELPER),
+)
+
+
+# ATR2 keeps the 40-byte readout and uses sample byte 3 for the MCU amp state.
+# The classifier saves a baseline after two seconds of continuous lock, then the
+# first unlocked sample and the first unlocked sample at least two seconds later.
+# Header bit 4 tracks the lock streak and bit 3 marks the latest sample.
+AUDIO_IDLE_TRACE_CODE = 0x1DEE0
+AUDIO_IDLE_TRACE_HELPER = hx(
+    "2248007888f8030047f0080715f0020f38d098f8050010f0800f14d0"
+    "17f0100f03d1666347f010072ee0606b301ab0f5fa5f29d327f0060747f00107"
+    "d8e90001c4e9020120e027f0100717f0010f1bd017f0020f07d1266347f00207"
+    "d8e90001c4e9040110e017f0040f0dd1206b301ab0f5fa5f08d347f00407"
+    "d8e90001c4e9060101e027f01007fff758bf4f0e0020"
+)
+AUDIO_IDLE_TRACE_RECORDS: tuple[Record, ...] = (
+    ("keep the latest raw audio sample in slot four", 0x1DD6A,
+     hx("002d0cbf04f1080804f12008"), hx("04f1200800bf00bf00bf00bf")),
+    ("classify the sample by audio clock lock", 0x1DDD4, hx("98f80300"), hx("00f084b8")),
+    ("identify the idle capture format", 0x1DE8C, b"ATR1", b"ATR2"),
+    ("save samples before and after loss of lock", AUDIO_IDLE_TRACE_CODE,
+     bytes(len(AUDIO_IDLE_TRACE_HELPER)), AUDIO_IDLE_TRACE_HELPER),
+)
+
+
+# ATR3 uses the same reserved 128 bytes. Header bytes 4–5 hold the next ring
+# index and count. Each of 28 rows holds t16 (ms) and one byte per amplifier.
+# Bits 0–7 are PLL, switching, chip power-down, amp power-down, stable clock,
+# missing clock, hard mute and valid. Both SYSST and SYSCTRL must read cleanly.
+AUDIO_TIMED_TRACE_POLL = 0x1DEE0
+AUDIO_TIMED_TRACE_READ = 0x1DFC0
+AUDIO_TIMED_TRACE_HELPER = hx(
+    # Run the original poll and sample once per second in DP audio mode.
+    "2de9f041e5f72cf92d48807801282bd12c4ce9f7abfea56f"
+    "451bb5f57a6f23d3a067257904eb8507083780083880264e"
+    "3078012803d1342000f018f800e00020b8707078012803d1"
+    "352000f00ff800e00020f87001351c2d08bf002525716079"
+    "1c2838bf01306071bde8f081"
+    # Read SYSST and SYSCTRL via the stock 16-bit bus helper. Pass the
+    # address directly so the live firmware's amplifier selector is untouched.
+    "70b582b004461648214601226b46eaf727fdd8b9bdf800"
+    "501148214604226b46eaf71efd90b9bdf8001005f03100c5f3002240ea"
+    "420001f0030240ea8200c1f3002240ea821040f0800000e0002002b070bd00bf"
+    "7a03002028c50120be03002000000840"
+)
+AUDIO_TIMED_TRACE_READ_HELPER = hx(
+    # A7 AD followed by page 0–3 returns the header and seven rows.
+    "2b2c22d10278a72a1fd14278ad2a1cd18278042a19d22423"
+    "0b8030b4044615460b49082211f8013b00f8013b013af9d1"
+    "a5711c225543491911f8013b00f8013b013af9d1002030bc"
+    "7047ecf7adbf00bf28c50120"
+)
+AUDIO_TIMED_TRACE_RECORDS: tuple[Record, ...] = (
+    ("clear all 128 reserved bytes", 0x1DD24, hx("0c22"), hx("2022")),
+    ("identify the timed amplifier capture format", 0x1DE8C, b"ATR1", b"ATR3"),
+    ("sample both amplifiers in the first display loop", 0x034A4, hx("1af004fd"), hx("1af01cfd")),
+    ("sample both amplifiers in the second display loop", 0x038DC, hx("1af0e8fa"), hx("1af000fb")),
+    ("read one page of the timed capture", AUDIO_TRACE_READ, hx("2b2c10d1"), hx("00f0afb8")),
+    ("sample two hardware status registers per amplifier", AUDIO_TIMED_TRACE_POLL,
+     bytes(len(AUDIO_TIMED_TRACE_HELPER)), AUDIO_TIMED_TRACE_HELPER),
+    ("return one of four frozen trace pages", AUDIO_TIMED_TRACE_READ,
+     bytes(len(AUDIO_TIMED_TRACE_READ_HELPER)), AUDIO_TIMED_TRACE_READ_HELPER),
+)
+
+
+def build_audio_trace(immediate: bytes, *, idle: bool = False, timed: bool = False) -> bytes:
+    if sha256(immediate) != IMMEDIATE_DP_SHA256:
+        fail("audio trace requires the exact immediate DP-first MCU")
+    out = bytearray(immediate)
+    records = AUDIO_TRACE_RECORDS
+    expected_sha256 = AUDIO_TRACE_SHA256
+    if timed:
+        records += AUDIO_TIMED_TRACE_RECORDS
+        expected_sha256 = AUDIO_TIMED_TRACE_SHA256
+    elif idle:
+        records += AUDIO_IDLE_TRACE_RECORDS
+        expected_sha256 = AUDIO_IDLE_TRACE_SHA256
+    for label, offset, old, new in records:
+        if len(old) != len(new) or out[offset:offset + len(old)] != old:
+            fail(f"audio trace guard mismatch at 0x{offset:05X}: {label}")
+        out[offset:offset + len(new)] = new
+    fix_container_crc(out)
+    if sha256(out) != expected_sha256:
+        fail(f"audio trace SHA-256 mismatch: {sha256(out)}")
+    validate_container(out, "Air 2 Pro audio trace")
+    return bytes(out)
+
+
+# Poll SYSST separately from the 1 Hz recorder. The last four reserved ATR3
+# RAM bytes hold the 16-bit tick and a mute ownership byte for each amplifier.
+# shortcut: polling can miss a click at the first unstable edge, use a verified advance signal if it persists.
+AUDIO_CLOCK_MUTE_CODE = 0x1E014
+AUDIO_CLOCK_MUTE_HELPER = hx(
+    # Run the original poll. With the stock amplifier profile open in DP
+    # mode, sample each detected device no more than once every 8 ms.
+    "70b5e5f793f8454ca078474c01281cd143480078c12818d1e9f70efe2188411a89b22029"
+    "13d320803e4e02343078012803d12046342100f00bf87078012806d1601c352100f004f8"
+    "01e00020206070bd"
+    # Ownership: 0 none, 1 write pending, 2 muted, 3 first good recovery
+    # sample. Recovery requires two stable, switching, fault-free reads.
+    "70b582b004460d46344801226b46eaf79bfc002847d1bdf8006006f0310011280ed12078"
+    "002843d040f23f110e4040f211118e4237d1032820d00320207037e0"
+    # Clock unstable: only take ownership when the amp is powered up and
+    # HMUTE was clear. Keep the pending bit so a failed write can be retried.
+    "2078022817d200f035f8002830d1bdf8003013f0030f23d113f4807f08d10120207043f4"
+    "807300f02bf8002820d102e0207800281cd00220207019e0"
+    # Clear only HMUTE, and only for an owned amp. Failed reads or writes
+    # invalidate recovery confirmation. Stock owns shutdown and route changes.
+    "00f01af8002810d1bdf8003013f0030f08d113f4807f05d023f4807300f012f8002802d1"
+    "0020207004e02078032801d10120207002b070bd"
+    "0948294604226b46eaf744bc064829460422eaf76ebc00bf"
+    "7a0300204f0e0020be030020a4c5012000000840"
+)
+
+
+# Log both amps before the mute handler runs. Keep the existing ATR3 layout.
+# The 8 ms limiter bounds bus traffic, and the main-loop period sets the
+# actual cadence. The one-second heartbeat bounds gaps in the rolling window.
+AUDIO_EDGE_TRACE_CODE = 0x1E144
+AUDIO_EDGE_TRACE_HELPER = hx(
+    "2de9f0412248807801283cd1214ce9f77bfda16f411a202935d3a067800880b280461d4e"
+    # Read both present devices through the existing ATR3 status encoder.
+    "00273078012803d13420fff7ebfe07467078012804d13520fff7e4fe47ea0027"
+    # Compare both status bytes to the newest row before writing to the ring.
+    "2579667914f10803002e0dd0691e00d51b2153f82120110cb94205d1b8eb020292b2b2f57a7f0cd3"
+    # Append the edge or heartbeat, then run the existing control logic.
+    "48ea074243f8252001351c2d08bf002525711c2e3cbf01366671fff723ffbde8f08100bf"
+    "7a03002028c50120be030020"
+)
+
+
+# ATR4 uses the same pages as ATR3. The second status byte is the receiver
+# snapshot, read before amplifier 0x34 so a change between the two reads
+# cannot by itself make an absent stream appear to precede stable clock.
+AUDIO_BRIDGE_TRACE_HELPER = hx(
+    "10b584b0ff20e021e7f7fafb002814d1"                  # select page E0
+    "0020039003a800900123019332200290084843218522"      # one-byte read of E085
+    "e9f785fd002807d19df80c00fe2804d3fd2002e0"          # reserve FE and FF for errors
+    "fe2000e0ff2004b010bd00100840"                      # page error, read error, return
+)
+AUDIO_BRIDGE_TRACE_RECORDS: tuple[Record, ...] = (
+    ("identify synchronized receiver and amplifier data as ATR4", 0x1DE8C, b"ATR3", b"ATR4"),
+    ("sample receiver first and then left amplifier", 0x1E168,
+     hx("00273078012803d13420fff7ebfe07467078012804d13520fff7e4fe47ea0027"),
+     hx("00f03af807023078012809d13420fff7e9fe074300bf00bf00bf00bf00bf00bf")),
+    ("read receiver status and retain I2C failure reasons", 0x1E1E0,
+     bytes(len(AUDIO_BRIDGE_TRACE_HELPER)), AUDIO_BRIDGE_TRACE_HELPER),
+    ("keep ATR4 bits out of the stock display getter", 0x056C8,
+     hx("0446022c"), hx("18f0bafd")),
+    ("mask off telemetry only when the receiver marker is present", 0x1E240,
+     bytes(18), hx("00f0e004 a02c 01d1 00f00100 0446 022c 7047")),
+)
+
+
+def build_audio_clock_mute(timed_trace: bytes, *, edge_trace: bool = False,
+                           bridge_trace: bool = False) -> bytes:
+    if sha256(timed_trace) != AUDIO_TIMED_TRACE_SHA256:
+        fail("audio clock mute requires the exact timed trace MCU")
+    out = bytearray(timed_trace)
+    records = (
+        ("run clock mute before ATR3 capture", AUDIO_TIMED_TRACE_POLL + 4, hx("e5f72cf9"), hx("00f096f8")),
+        ("manage only the SmartPA hard-mute bit", AUDIO_CLOCK_MUTE_CODE,
+         bytes(len(AUDIO_CLOCK_MUTE_HELPER)), AUDIO_CLOCK_MUTE_HELPER),
+    )
+    expected_sha256 = AUDIO_CLOCK_MUTE_SHA256
+    if edge_trace or bridge_trace:
+        records += (
+            ("route ATR3 polling to the audio edge sampler", AUDIO_TIMED_TRACE_POLL,
+             hx("2de9f041"), hx("00f030b9")),
+            ("record clock, switching and mute transitions", AUDIO_EDGE_TRACE_CODE,
+             bytes(len(AUDIO_EDGE_TRACE_HELPER)), AUDIO_EDGE_TRACE_HELPER),
+        )
+        expected_sha256 = AUDIO_EDGE_TRACE_SHA256
+    if bridge_trace:
+        records += AUDIO_BRIDGE_TRACE_RECORDS
+        expected_sha256 = AUDIO_BRIDGE_TRACE_SHA256
+    for label, offset, old, new in records:
+        if len(old) != len(new) or out[offset:offset + len(old)] != old:
+            fail(f"audio clock mute guard mismatch at 0x{offset:05X}: {label}")
+        out[offset:offset + len(new)] = new
+    fix_container_crc(out)
+    if sha256(out) != expected_sha256:
+        fail("audio clock mute or edge trace SHA-256 mismatch")
+    validate_container(out, "Air 2 Pro audio clock mute")
+    return bytes(out)
+
+
+# The held-key handler already validated the four-second threshold and its
+# inhibit flags. Keep the adapter guard and reserve bit 2 of the key's flags
+# to consume the release of a hold that already switched audio.
+USB_TO_DP_ON_HOLD_CODE = hx(
+    "0848 8078 50b9 0849 0978 0129 08d0"   # cached USB route; adapter guard
+    "0749 0878 40f00400 0870 fff702fd"      # mark handled, call 1DC74
+    "ecf712bd ecf707bd"                    # stock held-key epilogue or USB cue
+    "7a030020 bd0c0020 880d0020"
+    "0548 0178 8078 0428 04d1 11f0040f 01d0"  # release with handled bit set
+    "ecf736bd ecf707bd 880d0020"           # clear flags or resume stock release
+)
+USB_TO_DP_ON_HOLD_RECORDS: tuple[Record, ...] = (
+    ("switch USB to DP on a confirmed hold", 0x0AC80, hx("5d488078"), hx("13f0e8ba")),
+    ("consume the matching release", 0x0ACA6, hx("43488078"), hx("13f0edba")),
+    ("held-key and release handlers", 0x1E254, bytes(len(USB_TO_DP_ON_HOLD_CODE)),
+     USB_TO_DP_ON_HOLD_CODE),
+)
+# An interrupt can report the same still-pressed button. Only a new press
+# should restart its timer. The stock double-press state sets its own timestamp.
+USB_TO_DP_STABLE_HOLD_RECORD: Record = (
+    "keep the Brightness + timestamp across shared GPIO interrupts",
+    0x07336, hx("08b9"), hx("20b9"),
+)
+BRIGHTNESS_MINUS_STABLE_HOLD_RECORD: Record = (
+    "keep the Brightness - timestamp across shared GPIO interrupts",
+    0x0737A, hx("08b9"), hx("20b9"),
+)
+
+
+def build_usb_to_dp_on_hold(bridge_trace: bytes, *, stable: bool = False) -> bytes:
+    if sha256(bridge_trace) != AUDIO_BRIDGE_TRACE_SHA256:
+        fail("USB-to-DP on hold requires the exact ATR4 MCU")
+    out = bytearray(bridge_trace)
+    records = USB_TO_DP_ON_HOLD_RECORDS
+    expected = USB_TO_DP_ON_HOLD_SHA256
+    if stable:
+        records += (USB_TO_DP_STABLE_HOLD_RECORD,)
+        expected = USB_TO_DP_STABLE_HOLD_SHA256
+    for label, offset, old, new in records:
+        if len(old) != len(new) or out[offset:offset + len(old)] != old:
+            fail(f"USB-to-DP on hold guard mismatch at 0x{offset:05X}: {label}")
+        out[offset:offset + len(new)] = new
+    fix_container_crc(out)
+    if sha256(out) != expected:
+        fail("USB-to-DP on hold output differs from its pinned SHA-256")
+    validate_container(out, "Air 2 Pro USB-to-DP on hold")
+    return bytes(out)
+
+
+# Bit 1 in each key's cue flags records that its four-second gesture was
+# handled. The stock release epilogues clear the flags for the next press.
+AUDIO_ROUTE_BUTTONS_CODE = hx(
+    "2948 0178 41f00201 0170 0020 00f03af8 ecf751bd "       # 1E254: + hold selects USB
+    "2448 0178 8078 0428 01d1 8907 01d4 ecf718bd ecf743bd " # 1E268: consume + release before adapter checks
+    "0020 2ae0 "                                           # 1E27E: + release fallback
+    "1f4a 1178 11f0020f 0dd1 5068 40f69f71 ebf741f9 48b1 " # 1E282: - hold, stock timer
+    "194a 1178 41f00201 1170 0120 00f018f8 ecf748be "        # latch gesture and select DP
+    "1448 4068 ecf71bbe "                                   # resume the stock two-second cue
+    "124a 1078 10f0020f 1cd1 10b5 5068 40f69f71 ebf727f9 " # 1E2B4: - release fallback
+    "bde81040 08b1 0120 01e0 faf73cb9 "                     # shorter hold uses stock action
+    "0849 897a 11f0080f 0ad1 0849 0978 0129 06d0 "         # 1E2D8: adapter and no-USB locks
+    "0749 8978 4840 0128 01d1 fff7bebc 7047 00bf "          # toggle only from the opposite route
+    "880d0020 a00d0020 bd0c0020 7a030020"                   # key +, key -, adapter, cached route
+)
+AUDIO_ROUTE_BUTTONS_RECORDS: tuple[Record, ...] = (
+    USB_TO_DP_STABLE_HOLD_RECORD,
+    BRIGHTNESS_MINUS_STABLE_HOLD_RECORD,
+    ("select USB during a four-second Brightness + hold", 0x0AC80,
+     hx("5d488078"), hx("13f0e8ba")),
+    ("clear a handled Brightness + release before the stock adapter checks", 0x0ACA6,
+     hx("43488078"), hx("13f0dfba")),
+    ("select USB if the Brightness + hold was first recognized on release", 0x0ACE0,
+     hx("12f0c8ff"), hx("13f0cdfa")),
+    ("select DP during a four-second Brightness - hold", 0x0AEE6,
+     hx("1d494868"), hx("13f0ccb9")),
+    ("select DP if the Brightness - hold was first recognized on release", 0x0AF32,
+     hx("0df00dfb"), hx("13f0bff9")),
+    ("directional audio route handlers", 0x1E254, bytes(len(AUDIO_ROUTE_BUTTONS_CODE)),
+     AUDIO_ROUTE_BUTTONS_CODE),
+)
+
+
+# The 24 bytes below ATR4's reservation store the last input poll tick,
+# the fresh active-low sample (converted to pressed bits and a validity bit),
+# and a timestamp and state for each key. Each key goes idle, pressed, handled.
+AUDIO_ROUTE_BUTTONS_V2_CODE = hx(
+    "5148 0021 0622 02c0 013a fcd1 fff75ebd "               # 1E254: zero the state and chain to ATR4 init
+    "70b5 4d4c 0022 6260 e9f71ef8 6568 e9f7ebfc 0646 "     # 1E264: run the original key scan
+    "4a48 04f10801 2a46 0023 00f042f8 "                    # check + with USB as the destination
+    "4848 04f11001 6a08 0123 00f03bf8 70bd "               # check - with DP as the destination
+    "e9f7d9fc 4049 0a68 821a 3f4b 1b78 012b 1fd0 "        # 1E296: pending interrupt takes the normal path
+    "502a 1ad2 0b68 0a7b 012a 09d1 8a68 a0eb020c "
+    "bcf57a5f 03d3 9a1a b2f57a5f 0cd3 "                   # poll every 20 ms or at the first scan crossing + deadline
+    "0a7d 012a 0fd1 0a69 a0eb020c bcf57a5f 09d3 "
+    "9a1a b2f57a5f 05d2 "                                  # same deadline for -
+    "0860 e8f7f0bf 0860 e8f7eabf e9f760b8 "               # periodic reads leave the IRQ flag alone
+    "0028 fbd1 9df81000 00f00300 80f00701 264a 5160 "
+    "e8f7ffbf "                                           # 1E2F2: publish only a successful expander read
+    "2de99041 0446 0f46 02f00108 3879 042d 22d3 0228 1ad0 "
+    "072d 25d0 48b1 3868 301a 43f68061 8842 0ad2 "         # 1E30A: elapsed 16,000 quarter-millisecond ticks
+    "b8f1000f 1bd0 1ce0 b8f1000f 19d0 3e60 0120 3871 15e0 " # timestamp first fresh press, clear a short release
+    "5fea4800 3871 1846 00f012f8 07e0 "                     # select once at the threshold or a near-edge release
+    "b8f1000f 04d1 87f80480 01e0 0228 06d1 "               # keep consuming repeats until a fresh release
+    "0120 a070 0020 2070 01e0 0020 3871 bde89081 "          # suppress just the completed four-second gesture
+    "0a49 897a 11f0080f 0ad1 0a49 0978 0129 06d0 "         # 1E378: honor the no-USB and adapter locks
+    "0949 8978 4840 0128 01d1 fff76ebc 7047 00bf "          # call the stock switch only from the opposite route
+    "10c50120 180b0020 880d0020 a00d0020 bd0c0020 7a030020"
+)
+AUDIO_ROUTE_BUTTONS_V2_RECORDS: tuple[Record, ...] = (
+    USB_TO_DP_STABLE_HOLD_RECORD,
+    BRIGHTNESS_MINUS_STABLE_HOLD_RECORD,
+    ("reserve 24 additional bytes above the vector stack", 0x00040, hx("28c50120"), hx("10c50120")),
+    ("reserve the same space above the runtime stack", 0x002C8, hx("28c50120"), hx("10c50120")),
+    ("initialize route button state before ATR4", 0x1161A, hx("0cf081fb"), hx("0cf01bfe")),
+    ("evaluate the physical hold before the stock key dispatcher", 0x0A9CA, hx("fcf76ffc"), hx("13f04bfc")),
+    ("sample the button expander even if its interrupt is missed", 0x072BA, hx("47480078"), hx("16f0ecbf")),
+    ("publish a button sample only after a successful read", 0x07300, hx("9df81000"), hx("16f0f7bf")),
+    ("retire the original Brightness + release toggle", 0x0ACE0, hx("12f0c8ff"), hx("aff30080")),
+    ("physical button timing and directional route selection", 0x1E254, bytes(len(AUDIO_ROUTE_BUTTONS_V2_CODE)),
+     AUDIO_ROUTE_BUTTONS_V2_CODE),
+)
+
+
+def build_audio_route_buttons(bridge_trace: bytes, *, v2: bool = False) -> bytes:
+    if sha256(bridge_trace) != AUDIO_BRIDGE_TRACE_SHA256:
+        fail("audio route buttons require the exact ATR4 MCU")
+    out = bytearray(bridge_trace)
+    records = AUDIO_ROUTE_BUTTONS_V2_RECORDS if v2 else AUDIO_ROUTE_BUTTONS_RECORDS
+    expected = AUDIO_ROUTE_BUTTONS_V2_SHA256 if v2 else AUDIO_ROUTE_BUTTONS_SHA256
+    for label, offset, old, new in records:
+        if len(old) != len(new) or out[offset:offset + len(old)] != old:
+            fail(f"audio route buttons guard mismatch at 0x{offset:05X}: {label}")
+        out[offset:offset + len(new)] = new
+    fix_container_crc(out)
+    if sha256(out) != expected:
+        fail("audio route buttons output differs from its pinned SHA-256")
+    validate_container(out, "Air 2 Pro audio route buttons")
+    return bytes(out)
+
+
 def build(stock: bytes) -> bytes:
     out = bytearray(stock)
     for label, offset, old, new in RECORDS:
@@ -437,6 +820,26 @@ def main() -> None:
                        help="build the Air 2 Pro DP-first variant with a startup grace period")
     audio.add_argument("--dp-first-immediate", action="store_true",
                        help="request DP audio on the first addressed-host poll (Air 2 Pro)")
+    audio.add_argument("--audio-trace", action="store_true",
+                       help="capture bridge audio status across a 3D switch (Air 2 Pro)")
+    audio.add_argument("--audio-idle-trace", action="store_true",
+                       help="capture bridge audio status across clock loss (Air 2 Pro)")
+    audio.add_argument("--audio-timed-trace", action="store_true",
+                       help="capture a rolling log of amplifier hardware state (Air 2 Pro)")
+    audio.add_argument("--audio-clock-mute", action="store_true",
+                       help="test automatic amplifier mute on unstable I2S, with ATR3 (Air 2 Pro)")
+    audio.add_argument("--audio-edge-trace", action="store_true",
+                       help="capture amplifier transitions around clock mute (Air 2 Pro)")
+    audio.add_argument("--audio-bridge-trace", action="store_true",
+                       help="capture DP receiver and amplifier transitions as ATR4 (Air 2 Pro)")
+    audio.add_argument("--usb-to-dp-on-hold", action="store_true",
+                       help="test USB-to-DP switching before button release, with ATR4 (Air 2 Pro)")
+    audio.add_argument("--usb-to-dp-stable-hold", action="store_true",
+                       help="test USB-to-DP with the hold timer preserved across interrupts (Air 2 Pro)")
+    audio.add_argument("--audio-route-buttons", action="store_true",
+                       help="hold Brightness + for USB or Brightness - for DP (Air 2 Pro)")
+    audio.add_argument("--audio-route-buttons-v2", action="store_true",
+                       help="time both audio holds from polled physical button state (Air 2 Pro)")
     args = parser.parse_args()
     if not (args.out or args.check_only or args.verify):
         parser.error("choose one of --out, --check-only, --verify")
@@ -452,6 +855,37 @@ def main() -> None:
             print("  direct USB host: first poll after USB addressing (experimental)")
         print("  startup: DP preferred once per power-up; four-second Brightness + toggles USB/DP")
         print(f"  container CRC: 0x{head(image)['stored_crc']:08X}")
+        print(f"  sha256: {sha256(image)}")
+    usb_to_dp_on_hold = args.usb_to_dp_on_hold or args.usb_to_dp_stable_hold
+    audio_route_buttons = args.audio_route_buttons or args.audio_route_buttons_v2
+    bridge_trace = args.audio_bridge_trace or usb_to_dp_on_hold or audio_route_buttons
+    if any((args.audio_trace, args.audio_idle_trace, args.audio_timed_trace,
+            args.audio_clock_mute, args.audio_edge_trace, bridge_trace)):
+        image = build_audio_trace(build_dp_first(image, immediate=True), idle=args.audio_idle_trace,
+                                  timed=any((args.audio_timed_trace, args.audio_clock_mute,
+                                             args.audio_edge_trace, bridge_trace)))
+        if bridge_trace:
+            image = build_audio_clock_mute(image, bridge_trace=True)
+            if audio_route_buttons:
+                image = build_audio_route_buttons(image, v2=args.audio_route_buttons_v2)
+                version = " v2" if args.audio_route_buttons_v2 else ""
+                print(f"=== Air 2 Pro experimental audio route buttons{version} MCU (ATR4) ===")
+                print("  four-second hold: Brightness + selects USB; Brightness - selects DP")
+            elif usb_to_dp_on_hold:
+                image = build_usb_to_dp_on_hold(image, stable=args.usb_to_dp_stable_hold)
+                print("=== Air 2 Pro experimental USB-to-DP on hold MCU (ATR4) ===")
+                if args.usb_to_dp_stable_hold:
+                    print("  hold timer: preserve the press timestamp across GPIO interrupts")
+            else:
+                print("=== Air 2 Pro synchronized receiver and amplifier trace MCU (ATR4) ===")
+        elif args.audio_edge_trace:
+            image = build_audio_clock_mute(image, edge_trace=True)
+            print("=== Air 2 Pro experimental amplifier edge trace MCU ===")
+        elif args.audio_clock_mute:
+            image = build_audio_clock_mute(image)
+            print("=== Air 2 Pro experimental I2S clock mute MCU with ATR3 ===")
+        else:
+            print("=== Air 2 Pro DP audio trace MCU ===")
         print(f"  sha256: {sha256(image)}")
 
     if args.verify:

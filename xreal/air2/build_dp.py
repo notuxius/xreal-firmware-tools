@@ -34,6 +34,24 @@ OUTPUT_SHA256 = "46556947E81DD7EBBD7F26B2541B63E0362804C166C020639DA908D2ABB2F48
 OUTPUT_CRC = 0xA86203B1
 OUTPUT_TAG = 0xBF
 EXPECTED_DIFFS = 384
+AUDIO_RELOCK_SHA256 = "AF8B04D4C3EE54C5DD6BB35EA4843C44E418D26F6E8DB181D87F91935C31119F"
+AUDIO_RELOCK_CRC = 0xB2C32901
+AUDIO_RELOCK_TAG = 0x1E
+AUDIO_MODE_RESET_SHA256 = "1A7D2A5B8F8569145FF8D845A809F0B1F6948832B30A9CD6E1B3C587ED35EEEB"
+AUDIO_MODE_RESET_CRC = 0x60F1E50F
+AUDIO_MODE_RESET_TAG = 0x9E
+AUDIO_CLOCK_HOLD_SHA256 = "39855EC13FA0C413EF8772820F4A7DB158756FC71945AE7CE093A8E196B605EB"
+AUDIO_CLOCK_HOLD_CRC = 0x3B3D0382
+AUDIO_CLOCK_HOLD_TAG = 0xE5
+AUDIO_BRIDGE_TRACE_SHA256 = "26DF7048374E149F46805278FA249419B55215DAF52E5804A029AB3D26E0727F"
+AUDIO_BRIDGE_TRACE_CRC = 0x592D07A2
+AUDIO_BRIDGE_TRACE_TAG = 0x9B
+AUDIO_FAST_RESUME_SHA256 = "A5B9B0F11221658483D4B15288B6AA1546CDF44849D7AB59C9CEC717A9D42607"
+AUDIO_FAST_RESUME_CRC = 0x612A805E
+AUDIO_FAST_RESUME_TAG = 0x13
+AUDIO_MUTE_PROBE_SHA256 = "7706A0CA8428DD06BB251A642DCCD101FB0216EEF3DECEBF41B59AFCD1E76E42"
+AUDIO_MUTE_PROBE_CRC = 0x1117BB82
+AUDIO_MUTE_PROBE_TAG = 0x59
 
 EXPECT_PROJECT = 0x0900
 EXPECT_FWTYPE = 2
@@ -200,10 +218,108 @@ POST_RECORDS: tuple[Record, ...] = (
 )
 
 ALL_RECORDS = RECORDS + POST_RECORDS
-RECORD_BYTES = sum(len(old) for _label, _offset, old, _new in ALL_RECORDS)
+
+# ADD A,#0xFB / JNC exit keeps checking on polls 5..255. The
+# early lock check, recalibration and uint8 counter wrap still execute.
+AUDIO_RELOCK_RECORD: Record = (
+    "retry a late audio PLL lock", 0x084CA, hx("6405703f"), hx("24fb503f"),
+)
+
+# The existing E0B8==1 gate calls this after the B6 retrain delay. Keep
+# the stock CDR action, clear the audio phase/rate, and disable I2S output
+# through the same routine used by the stock audio state machine.
+AUDIO_MODE_RESET_RECORDS: tuple[Record, ...] = (
+    ("restart DP audio after B6 link retrain", 0x09188, hx("12c54b"), hx("129166")),
+    ("reset cached audio phase and sample rate", 0x091A6, bytes(14),
+     hx("12c54b e4 9006ea f0 a3 f0 ff 02c138")),
+)
 
 
-def build(stock: bytes) -> bytes:
+# Keep the existing pin configuration after a locked DP stream loses PLL lock.
+# The bridge's ability to keep clocking and send silence in standby is unverified.
+AUDIO_CLOCK_HOLD_RECORDS: tuple[Record, ...] = (
+    ("check the audio route before disabling I2S on lock loss", 0x084F5,
+     hx("ff 12c138"), hx("029174 00")),
+    ("leave I2S enabled on DP lock loss; preserve stock behavior on other routes",
+     0x091B4, bytes(16),
+     hx("90e0b8 e0 b40101 22 e4 ff 12c138 0284b9")),
+)
+
+# Publish from the main loop even when the audio state handler is idle.
+# E085 already carries bridge status to the MCU. Preserve its display flag.
+AUDIO_BRIDGE_TRACE_RECORDS: tuple[Record, ...] = (
+    ("sample the receiver before the main-loop housekeeping call", 0x0BA5E,
+     hx("1248f9"), hx("129184")),
+    ("publish route, rate, PLL, and pin configuration in display status", 0x091C4,
+     bytes(86), hx(
+         "c0e0 c082 c083 c0d0 ee c0e0 ef c0e0"     # save ACC, DPTR, PSW, R6, R7
+         "7ea2 90e0b8e0 b40126"                    # route inactive unless E0B8 is 1
+         "12a97d 7ea0 ef b4ff02 8006 7ea4 6002 7ea6"  # marker, valid, rate present
+         "90e2ebe0 30e704 ee4408fe"                 # bridge PLL status bit
+         "90d423e0 6004 ee4410fe"                   # output pin configuration
+         "90e085e0 5401 4e f0"                      # retain the display flag
+         "d0e0 ff d0e0 fe d0d0 d083 d082 d0e0 0248f9"  # restore context, run stock call
+     )),
+)
+
+
+# Preserve the last configured rate through ordinary DP standby. Reuse it
+# only when the same rate returns with I²S still configured and PLL locked.
+AUDIO_FAST_RESUME_RECORDS: tuple[Record, ...] = (
+    ("check whether the configured audio clock can resume without a reset", 0x0C30A,
+     hx("12a97d"), hx("023430")),
+    ("resume a locked same-rate DP stream or fall back to stock acquisition", 0x03470,
+     bytes(108), hx(
+         "12a97d 9006eae0 b40444"                  # read normalized rate, check standby phase
+         "90e0b8e0 b40134"                         # clear standby state on route change
+         "ef 604d b4ff02 8048"                     # absent/invalid: reset the retry counter
+         "9006ebe0 6f 7049"                        # different rate: use stock acquisition
+         "90d423e0 6010 90e2ebe0 20e710"           # pins configured and PLL locked
+         "9006e9e0 04 f0 b40330"                   # allow two polls for the PLL to recover
+         "9006eb e4f0 802c"                        # force stock acquisition on third poll
+         "9006ea7403f0 8021"                       # lock recovered: resume the running phase
+         "9006eae4f0a3f0 801b"                     # leave standby on a non-DP route
+         "b40318 ef 7015 90e0b8e0 b4010e"          # enter standby from running DP on rate 0
+         "9006ea7404f0 9006e9e4f0"                 # retain the configured rate across idle
+         "7f0022 02c2cd"                           # unchanged / stock rate comparison
+     )),
+)
+
+# Probe bit 4 in the stream-attribute block. The raw VB-ID offset is unknown.
+AUDIO_MUTE_PROBE_RECORD: Record = (
+    "mirror bit 4 of four candidate receiver registers", 0x091C4, bytes(88), hx(
+        "c0e0 c082 c083 c0d0 ee c0e0"                  # save context
+        "7e00 90e0b8e0 b4012e 7ea0"                   # no receiver marker outside DP audio
+        "90e730e0 30e404 ee4402fe"
+        "90e735e0 30e404 ee4404fe"
+        "90e736e0 30e404 ee4408fe"
+        "90e737e0 30e404 ee4410fe"
+        "90e085e0 5401 4e f0"                          # retain the display flag
+        "d0e0 fe d0d0 d083 d082 d0e0 0248f9"            # restore context, run stock call
+    ),
+)
+
+
+def audio_records(audio_relock: bool, mode_audio_reset: bool,
+                  audio_clock_hold: bool, audio_bridge_trace: bool,
+                  audio_fast_resume: bool = False,
+                  audio_mute_probe: bool = False) -> tuple[Record, ...]:
+    resume = audio_fast_resume or audio_mute_probe
+    if audio_bridge_trace or audio_clock_hold or resume:
+        records = (AUDIO_RELOCK_RECORD,) + AUDIO_MODE_RESET_RECORDS + AUDIO_CLOCK_HOLD_RECORDS
+        if audio_mute_probe:
+            records += (AUDIO_BRIDGE_TRACE_RECORDS[0], AUDIO_MUTE_PROBE_RECORD)
+        elif audio_bridge_trace or resume:
+            records += AUDIO_BRIDGE_TRACE_RECORDS
+        return records + AUDIO_FAST_RESUME_RECORDS if resume else records
+    if mode_audio_reset:
+        return (AUDIO_RELOCK_RECORD,) + AUDIO_MODE_RESET_RECORDS
+    return (AUDIO_RELOCK_RECORD,) if audio_relock else ()
+
+
+def build(stock: bytes, *, audio_relock: bool = False, mode_audio_reset: bool = False,
+          audio_clock_hold: bool = False, audio_bridge_trace: bool = False,
+          audio_fast_resume: bool = False, audio_mute_probe: bool = False) -> bytes:
     out = bytearray(stock)
     for label, offset, old, new in RECORDS:
         if len(old) != len(new):
@@ -211,7 +327,9 @@ def build(stock: bytes) -> bytes:
         if out[offset:offset + len(old)] != old:
             fail(f"stock guard mismatch at 0x{offset:05X}: {label}")
         out[offset:offset + len(new)] = new
-    for label, offset, old, new in POST_RECORDS:
+    post_records = POST_RECORDS + audio_records(audio_relock, mode_audio_reset, audio_clock_hold,
+                                               audio_bridge_trace, audio_fast_resume, audio_mute_probe)
+    for label, offset, old, new in post_records:
         if out[offset:offset + len(old)] != old:
             fail(f"derived guard mismatch at 0x{offset:05X}: {label}")
         out[offset:offset + len(new)] = new
@@ -348,38 +466,88 @@ def verify_rgb_profile_contract(stock: bytes, image: bytes) -> None:
         fail("profile finalizer transition-latch contract changed")
 
 
-def verify_output(stock: bytes, image: bytes) -> None:
+def verify_output(stock: bytes, image: bytes, *, audio_relock: bool = False,
+                  mode_audio_reset: bool = False, audio_clock_hold: bool = False,
+                  audio_bridge_trace: bool = False, audio_fast_resume: bool = False,
+                  audio_mute_probe: bool = False) -> None:
     validate_container(image, "built image")
-    if image != build(stock) or build(stock) != build(stock):
-        fail("build is not deterministic")
+    if image != build(stock, audio_relock=audio_relock, mode_audio_reset=mode_audio_reset,
+                      audio_clock_hold=audio_clock_hold, audio_bridge_trace=audio_bridge_trace,
+                      audio_fast_resume=audio_fast_resume, audio_mute_probe=audio_mute_probe):
+        fail("output differs from the guarded build")
 
+    records = ALL_RECORDS + audio_records(audio_relock, mode_audio_reset, audio_clock_hold,
+                                         audio_bridge_trace, audio_fast_resume, audio_mute_probe)
     allowed = set(range(4)) | {TAG_OFF}
-    for _label, offset, old, _new in ALL_RECORDS:
+    for _label, offset, old, _new in records:
         allowed.update(range(offset, offset + len(old)))
     diffs = [i for i, (before, after) in enumerate(zip(stock, image)) if before != after]
     stray = [i for i in diffs if i not in allowed]
     if stray:
         fail("changed bytes outside the record set: " + " ".join(f"0x{i:05X}" for i in stray))
-    if len(diffs) != EXPECTED_DIFFS:
-        fail(f"changed-byte count is {len(diffs)}, expected {EXPECTED_DIFFS}")
+    if audio_mute_probe:
+        expected_diffs, expected_sha, expected_crc, expected_tag = (
+            620, AUDIO_MUTE_PROBE_SHA256, AUDIO_MUTE_PROBE_CRC, AUDIO_MUTE_PROBE_TAG,
+        )
+    elif audio_fast_resume:
+        expected_diffs, expected_sha, expected_crc, expected_tag = (
+            619, AUDIO_FAST_RESUME_SHA256, AUDIO_FAST_RESUME_CRC, AUDIO_FAST_RESUME_TAG,
+        )
+    elif audio_bridge_trace:
+        expected_diffs, expected_sha, expected_crc, expected_tag = (
+            509, AUDIO_BRIDGE_TRACE_SHA256, AUDIO_BRIDGE_TRACE_CRC, AUDIO_BRIDGE_TRACE_TAG,
+        )
+    elif audio_clock_hold:
+        expected_diffs, expected_sha, expected_crc, expected_tag = (
+            421, AUDIO_CLOCK_HOLD_SHA256, AUDIO_CLOCK_HOLD_CRC, AUDIO_CLOCK_HOLD_TAG,
+        )
+    elif mode_audio_reset:
+        expected_diffs, expected_sha, expected_crc, expected_tag = (
+            401, AUDIO_MODE_RESET_SHA256, AUDIO_MODE_RESET_CRC, AUDIO_MODE_RESET_TAG,
+        )
+    elif audio_relock:
+        expected_diffs, expected_sha, expected_crc, expected_tag = (
+            387, AUDIO_RELOCK_SHA256, AUDIO_RELOCK_CRC, AUDIO_RELOCK_TAG,
+        )
+    else:
+        expected_diffs, expected_sha, expected_crc, expected_tag = (
+            EXPECTED_DIFFS, OUTPUT_SHA256, OUTPUT_CRC, OUTPUT_TAG,
+        )
+    if len(diffs) != expected_diffs:
+        fail(f"changed-byte count is {len(diffs)}, expected {expected_diffs}")
 
     verify_edid(stock, image)
     verify_rgb_profile_contract(stock, image)
     h = head(image)
-    if sha256(image) != OUTPUT_SHA256:
+    if sha256(image) != expected_sha:
         fail(f"output SHA-256 mismatch: {sha256(image)}")
-    if h["stored_crc"] != OUTPUT_CRC:
+    if h["stored_crc"] != expected_crc:
         fail(f"container CRC mismatch: 0x{h['stored_crc']:08X}")
-    if image[TAG_OFF] != OUTPUT_TAG:
+    if image[TAG_OFF] != expected_tag:
         fail(f"bank0 tag mismatch: 0x{image[TAG_OFF]:02X}")
 
     print("=== XREAL Air 2 / Air 2 Pro - DP bridge ===")
     print("  stock input     : SHA-256 verified, projectCode 0x0900 (p55)")
-    print(f"  records applied : {len(ALL_RECORDS)} ({RECORD_BYTES} guarded bytes)")
+    record_bytes = sum(len(old) for _label, _offset, old, _new in records)
+    print(f"  records applied : {len(records)} ({record_bytes} guarded bytes)")
     print(f"  changed bytes   : {len(diffs)} (records + CRC + bank0 tag)")
     print("  EDID names      : Air 2 / Air 2 Pro (official runtime selection retained)")
     print("  720p            : VIC 4 + Air 2 standard timing; hardware scaler profile 4")
     print("  audio CTA       : E0B8==1 LPCM; otherwise no-audio; HDMI VSDB on both")
+    resume = audio_fast_resume or audio_mute_probe
+    clock_hold = audio_clock_hold or audio_bridge_trace or resume
+    if audio_relock or mode_audio_reset or clock_hold:
+        print("  audio PLL       : experimental late lock retries (Air 2 Pro only)")
+    if mode_audio_reset or clock_hold:
+        print("  audio restart   : reset DP audio state after B6 retrain")
+    if clock_hold:
+        print("  audio clock     : keep I2S enabled on DP PLL loss (unverified on hardware)")
+    if audio_mute_probe:
+        print("  audio trace     : sample bit 4 of E730/E735/E736/E737 (unverified VB-ID candidates)")
+    elif audio_bridge_trace or audio_fast_resume:
+        print("  audio trace     : publish DP receiver status for the ATR4 MCU")
+    if resume:
+        print("  audio resume    : retain the configured rate, avoiding a reset on locked same-rate resume")
     print("  native 1080p    : official RGB profile 0; residual scaler state cleared")
     print("  mode transition : native->720p sideband written once; steady 720p untouched")
     print("  Full-SBS        : official odd-profile selection retained")
@@ -399,14 +567,30 @@ def main() -> None:
     parser.add_argument("--out", type=Path, metavar="FILE")
     parser.add_argument("--check-only", action="store_true")
     parser.add_argument("--verify", type=Path, metavar="FILE")
+    experiment = parser.add_mutually_exclusive_group()
+    experiment.add_argument("--audio-relock", action="store_true",
+                            help="retry late audio PLL lock (experimental Air 2 Pro image)")
+    experiment.add_argument("--mode-audio-reset", action="store_true",
+                            help="also restart DP audio after a mode switch (Air 2 Pro)")
+    experiment.add_argument("--audio-clock-hold", action="store_true",
+                            help="test I2S output retention at DP idle (Air 2 Pro)")
+    experiment.add_argument("--audio-bridge-trace", action="store_true",
+                            help="publish DP receiver status for synchronized audio tracing (Air 2 Pro)")
+    experiment.add_argument("--audio-fast-resume", action="store_true",
+                            help="test same-rate DP audio resume without resetting I2S (Air 2 Pro)")
+    experiment.add_argument("--audio-mute-probe", action="store_true",
+                            help="probe candidate DP AudioMute fields (Air 2 Pro, ATR4 v2 MCU)")
     args = parser.parse_args()
     if not (args.out or args.check_only or args.verify):
         parser.error("choose one of --out, --check-only, --verify")
 
     stock = args.src.read_bytes()
     verify_stock(stock)
-    image = build(stock)
-    verify_output(stock, image)
+    variant = dict(audio_relock=args.audio_relock, mode_audio_reset=args.mode_audio_reset,
+                   audio_clock_hold=args.audio_clock_hold, audio_bridge_trace=args.audio_bridge_trace,
+                   audio_fast_resume=args.audio_fast_resume, audio_mute_probe=args.audio_mute_probe)
+    image = build(stock, **variant)
+    verify_output(stock, image, **variant)
 
     if args.verify:
         if not args.verify.exists() or args.verify.read_bytes() != image:

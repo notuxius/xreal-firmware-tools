@@ -12,7 +12,7 @@ The first release of this fork adds an option to switch the glasses to **Display
 
 | Glasses | DP-first in this release |
 |---|---|
-| XREAL Air 2 Pro | Both variants are accepted by the flasher. The hardware observations below are from one pair running the immediate build. |
+| XREAL Air 2 Pro | Both variants are accepted by the flasher. Two pairs have been tested with the immediate build. |
 | XREAL Air 2 (standard) | Shares the Pro’s stock MCU and DP images, making it a candidate for the same patch. DP-first is untested on this model and the release flasher rejects both variants for its USB product ID. |
 | XREAL Air (gen 1) | Uses different MCU and DP images. Its existing builder supports automatic DP audio on certain converters without USB data. Direct-host DP-first would require a separate gen 1 patch. |
 
@@ -21,11 +21,38 @@ The first release of this fork adds an option to switch the glasses to **Display
 | On the immediate build | What to expect |
 |---|---|
 | Motorola Signature | On one pair, audio played through the glasses after a cold connection without the right-channel crackle or a button press. Smart Connect opened **Mobile desktop** even with **Experience Hub** set as the default. Experience Hub was still available to select manually. Switching a second pair to DP manually also launched Mobile desktop. |
-| ASUS laptop running Windows | On the Intel port, a glasses-specific EDID override restored the DP playback device after reconnect. On the NVIDIA port, the glasses supplied their own EDID. With NVIDIA audio idle sleep disabled, the listener heard all three notes cleanly from the start on the final cold reconnect. [Windows troubleshooting and rollback](xreal/air2/docs/dp-first.md#windows-dp-audio-troubleshooting) |
+| ASUS Zephyrus M16 GU604VZ, NVIDIA RTX 4080 USB-C port | With the glasses’ own EDID and NVIDIA audio idle sleep disabled, the first pair played all three test notes cleanly on its final cold reconnect. The second pair showed the desktop and played clean left-only, right-only and stereo tones after reconnecting without a button press. |
+| Same laptop, Intel Iris Xe USB-C port | On the first pair, a glasses-specific EDID override restored the Windows DP playback device. On the second pair, Windows listed both the display and the playback device, but the glasses stayed black and silent. [Intel link test below](#intel-usb-c-black-screen-on-reconnect) |
 | Tracking and updating | DP mode disconnects USB audio, tracking, HID control and VSYNC. On a data-capable connection, hold **Brightness + for four seconds**, then release to return to USB. On the ASUS, the updater then read the MCU version and the tracking interface delivered 32 distinct sensor reports. Tracking inside a specific app remains untested. |
 | Switching hosts | The picture can briefly go dark while the display renegotiates. The manual audio choice lasts until the glasses lose power. A powered adapter can carry that choice across a host change. |
 
 Build locally from your own official firmware. The guide lists the required DP image hash, commands for both MCU variants, and how to restore USB-first behavior. [Build, verify, install and roll back](xreal/air2/docs/dp-first.md)
+
+### Intel USB-C black screen on reconnect
+
+With the second Air 2 Pro on the Intel port, Windows reported a 1920 × 1080, 60 Hz mirror even with the external monitor disconnected. A direct read from the glasses showed that all four DisplayPort lanes lacked signal lock. Switching to USB audio with **Brightness +** restored USB controls, but the picture stayed black.
+
+Restarting the Intel Iris Xe graphics adapter restored lock on all four lanes and the wearer could see the desktop. On the next cold reconnect, DP audio was selected automatically, but the lanes lost lock again. The wearer saw no picture and heard none of the stereo test tones. The NVIDIA port worked for both picture and sound on the same pair. [Windows audio setup and rollback](xreal/air2/docs/dp-first.md#windows-dp-audio-troubleshooting)
+
+The laptop was in **Ultimate GPU mode** during this test. Its role in the failure is unverified. To test it, select **Standard** in Armoury Crate, reboot, and try two cold reconnects with the same glasses, cable and Intel port, leaving the external monitor disconnected. Check for a visible desktop and audible stereo on each reconnect. If both pass, repeat in Ultimate mode to see whether the failure returns. [ASUS MUX guidance for the GU604V series](https://rog.asus.com/us/support/faq/1049763/)
+
+### One-command Windows DP audio setup
+
+If DP audio is missing or clips after reconnect, plug **one Air 2 Pro** running the kit DP image into the affected port. From the cloned repository root in **64-bit PowerShell as administrator**, run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\xreal\air2\setup-windows-audio.ps1
+```
+
+The script detects the GPU driving the glasses. On Intel it applies the kit's stereo EDID extension to that monitor instance. On NVIDIA it disables the AC and battery idle timeouts for the matching GPU audio device. This affects other audio outputs of that NVIDIA GPU and may increase idle power use. After setup, unplug at the glasses for ten seconds, reconnect and test playback. Run the command again on another affected port to configure it.
+
+Append `-WhatIf` to preview the detected target. To undo, connect to the port you configured and run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\xreal\air2\setup-windows-audio.ps1 -Undo
+```
+
+Setup saves the original settings per device in `HKLM\SOFTWARE\XREAL-Air2Pro-DP-Audio` before editing them. Repeat runs preserve that backup. Undo restores the saved bytes and removes values that were originally absent. Settings already in place before the first run remain yours to manage. [Manual settings and hardware test results](xreal/air2/docs/dp-first.md#windows-dp-audio-troubleshooting)
 
 ## About the upstream kit
 

@@ -2,6 +2,12 @@
 
 Two pairs reportedly crackle in the right channel on a direct Motorola connection. The same pairs play cleanly on the ASUS and through the VITURE adapter. On the Motorola, a four-second Brightness + hold gives clean sound until the next reconnect. The probed firmware explains the route change and its loss at startup. The underlying source of the USB-path distortion is still open. There is no phone audio capture, USB trace or measurement that identifies a channel-format, clock, gain or amplifier defect.
 
+**XREAL Beam → VITURE hub → two pairs of glasses.** On the reported run, neither pair played the VLC movie on its first opening. After backing out, button presses were audible before the movie was reopened. The same movie then played through both pairs. On a fresh connection, try moving the selection on the Beam home screen. If the navigation click is audible through both pairs, open the movie and check whether it has sound on the first try.
+
+On a later run, the user powered on the Beam and the first VLC movie playback sounded clean. After exiting VLC to the alternate menu, navigation sounds were slightly distorted. Reopening the movie produced severe distortion. This run used the alternate menu rather than Evo Launcher. Which pairs reproduced the distortion and whether the launcher affected it are unconfirmed.
+
+In the November 21, 2026 Beam and VITURE hub test, switching the first pair to 3D left the second pair's left eyepiece black until that pair was also switched to 3D. Once both pairs were in 3D, both showed the full 3D picture and played DisplayPort (DP) audio.
+
 ## One-pair trial with the installed firmware
 
 For the optional DP-first MCU, use the [one-pair installation and rollback guide](dp-first.md). The Android trial and baseline analysis below apply to the original USB-first kit build.
@@ -38,6 +44,21 @@ The button's route selector lives in SRAM and bridge state. The cold initializer
 The stock manual DP path closes the composite device. The host consequently loses USB Audio, IMU (interface 3), HID control (4) and VSYNC (5). Host-based tracking and updates through application HID depend on those interfaces. This does not establish whether an internal sensor stops sampling. A forced startup change could also close the updater's connection during a transfer. For later playback and Smart Connect observations on the immediate build, see the [DP-first hardware results](dp-first.md#immediate-dp-on-a-direct-motorola-or-asus-connection). [Kit HID protocol](../../../docs/hid-protocol.en.md)
 
 The DP bridge already supports both advertisements. Changing only the EDID leaves the MCU audio route unresolved. Skipping USB shutdown or changing clocks would require evidence of simultaneous DP-I2S, USB streaming/idle behavior and control-interface operation. The optional DP-first variant provides USB functions after a manual switch back. The default build retains the original host-dependent policy.
+
+### Brightness + hold tones
+
+Both the two-second and four-second cues play the same embedded WAV. The tone-related instructions and the WAV below are identical in the official `09.1.00.180_20240507` MCU and the immediate DP-first build.
+
+| Stage | MCU file offsets and behavior |
+|---|---|
+| While held | Event 3 tests elapsed time against 1999 and 3999 ms. At `0x0AC40` and `0x0AC84`, a nonzero cached route byte (`0x2000037C`, 1 for DP) skips the tone request. Both paths still mark the threshold reached. In USB mode each threshold sets `0x20000D41` to 1 and calls the amplifier-open routine at `0x1133C` with the current gain. Release actions are dispatched separately. |
+| Sound source | The initializer at `0x09534` points the player at PCM data at `0x1EB6C`, inside the RIFF/WAVE at `0x1EAA0`. The clip contains 5,728 stereo frames of 16-bit PCM at 48 kHz (119.3 ms). |
+| Playback | The request can start MCU audio output even when USB playback is idle (`0x01B90`). The transmit DMA handler calls the mixer at `0x0D266`. The mixer at `0x189AC` adds the clip to each channel and clears the request and sample index when the clip ends. |
+| DP routing | The stock transition calls `0x01E04`, which clears the MCU audio pin functions, disables its I²S peripheral and changes the GPIO routing. DP playback reaches the speakers through the bridge. Removing the two checks would request a clip on the inactive MCU output. |
+
+An offline Unicorn check exercised the held event at 1999, 2000, 3999 and 4000 ms on both images, with the timer and amplifier calls stubbed. In each image both thresholds advanced in either mode. Only USB mode requested the clip, once at each threshold.
+
+A possible experiment is to interrupt DP sound briefly, isolate the bridge audio output, play the clip on MCU I²S and restore the DP route and saved gain. First establish which device drives the shared clock and data lines during the handoff, whether the amplifier relocks cleanly, and what happens if the user releases the button during the clip. The public AW88266A register map does not document an independent tone generator. Simultaneous mixing with live DP audio and a temporary handoff both remain unverified on hardware. [AW88266A datasheet, digital audio interface and register map](https://atta.szlcsc.com/upload/public/pdf/source/20220923/0F57DA988EE590AA4ADC6573D3E5CBA6.pdf)
 
 ## Windows build and offline verification
 

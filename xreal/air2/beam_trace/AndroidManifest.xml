@@ -1,0 +1,14 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.xrealdiag.audiotrace" android:versionCode="6" android:versionName="1.5">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="30" />
+    <uses-feature android:name="android.hardware.usb.host" android:required="true" />
+    <application android:label="Air 2 Pro Audio Trace" android:allowBackup="false"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+        <activity android:name=".TraceActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

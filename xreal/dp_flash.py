@@ -31,7 +31,7 @@ RISKS -- read these
     shared payload name, so the file name tells you nothing. Project-code
     matching is necessary but not sufficient: Air 2 and Air 2 Pro both use
     0x0900. This writer therefore requires an exact known image SHA for the
-    connected PID. Air 2 and Air 2 Pro accept the same reviewed p55 images.
+    connected PID. Experimental audio images are Air 2 Pro only.
 
   * If the bank0 commit tag at [0x38] does not match, the DP7911 boot rejects
     bank0 and falls back to an internal image: version reads 1109, the monitor
@@ -74,6 +74,7 @@ sys.path.insert(0, str(HERE))
 import hid
 import container as integrity
 from air import build_dp as air_build
+from air2 import build_beam_audio_switch
 from air2 import build_dp as air2_build
 from glasses import VID, CTRL_IF, PIDS, build_fd
 
@@ -97,14 +98,28 @@ WRITE_PROFILES = {
 }
 # Air 2 Pro runs the same reviewed p55 stock/output images; only the USB PID
 # and runtime model selection separate it from Air 2.
-WRITE_PROFILES[0x0432] = dict(WRITE_PROFILES[0x0428], name="Air 2 Pro")
+WRITE_PROFILES[0x0432] = dict(WRITE_PROFILES[0x0428], name="Air 2 Pro",
+                            audio_relock_sha=air2_build.AUDIO_RELOCK_SHA256,
+                            audio_mode_reset_sha=air2_build.AUDIO_MODE_RESET_SHA256,
+                            audio_clock_hold_sha=air2_build.AUDIO_CLOCK_HOLD_SHA256,
+                            audio_bridge_trace_sha=air2_build.AUDIO_BRIDGE_TRACE_SHA256,
+                            audio_fast_resume_sha=air2_build.AUDIO_FAST_RESUME_SHA256,
+                            audio_mute_probe_sha=air2_build.AUDIO_MUTE_PROBE_SHA256,
+                            beam_audio_switch_sha=build_beam_audio_switch.DP_SHA256)
 
 # One SHA can belong to more than one PID: Air 2 and Air 2 Pro share both images.
 KNOWN_IMAGES: dict[str, tuple[set[int], str]] = {}
 for _pid, _profile in WRITE_PROFILES.items():
-    for _key, _label in (("stock_sha", "official stock"), ("output_sha", "published output")):
-        if _profile[_key] is not None:
-            KNOWN_IMAGES.setdefault(_profile[_key], (set(), _label))[0].add(_pid)
+    for _key, _label in (("stock_sha", "official stock"), ("output_sha", "published output"),
+                         ("audio_relock_sha", "experimental audio relock"),
+                         ("audio_mode_reset_sha", "experimental mode audio reset"),
+                         ("audio_clock_hold_sha", "experimental I2S clock hold"),
+                         ("audio_bridge_trace_sha", "experimental DP receiver audio trace"),
+                         ("audio_fast_resume_sha", "experimental DP audio fast resume"),
+                         ("audio_mute_probe_sha", "diagnostic DP AudioMute candidate probe"),
+                         ("beam_audio_switch_sha", "experimental Beam audio switch with LPCM EDID")):
+        if _digest := _profile.get(_key):
+            KNOWN_IMAGES.setdefault(_digest, (set(), _label))[0].add(_pid)
 
 # ---- protocol constants (xreal-protocol.js) ---------------------------------
 OFF_CRC, OFF_LEN, OFF_MSGID, OFF_PAYLOAD = 1, 5, 15, 22
@@ -253,7 +268,7 @@ def check_image(img: bytes, dev: Glasses | None) -> None:
     known = KNOWN_IMAGES.get(digest)
     if known is None:
         sys.exit("container checks pass, but SHA-256 is not an exact reviewed "
-                 "stock/public-output image:\n       %s" % digest)
+                 "firmware image:\n       %s" % digest)
     image_pids, image_kind = known
     image_model = " / ".join(WRITE_PROFILES[p]["name"] for p in sorted(image_pids))
     print("  image     : %s / %d B / projectCode 0x%04X = %s"
@@ -292,7 +307,11 @@ def verify_recovery(profile: dict) -> None:
 
 
 def image_approved(profile: dict, digest: str) -> bool:
-    return digest in (profile["stock_sha"], profile["output_sha"])
+    return digest in (profile["stock_sha"], profile["output_sha"],
+                      profile.get("audio_relock_sha"), profile.get("audio_mode_reset_sha"),
+                      profile.get("audio_clock_hold_sha"), profile.get("audio_bridge_trace_sha"),
+                      profile.get("audio_fast_resume_sha"), profile.get("audio_mute_probe_sha"),
+                      profile.get("beam_audio_switch_sha"))
 
 
 def flash(dev: Glasses, img: bytes) -> None:
@@ -391,6 +410,13 @@ def self_test() -> None:
     assert (pro["stock_sha"], pro["output_sha"]) == expected[0x0428]
     assert KNOWN_IMAGES[pro["stock_sha"]][0] == {0x0428, 0x0432}
     assert KNOWN_IMAGES[pro["output_sha"]][0] == {0x0428, 0x0432}
+    for digest in (air2_build.AUDIO_RELOCK_SHA256, air2_build.AUDIO_MODE_RESET_SHA256,
+                   air2_build.AUDIO_CLOCK_HOLD_SHA256, air2_build.AUDIO_BRIDGE_TRACE_SHA256,
+                   air2_build.AUDIO_FAST_RESUME_SHA256, air2_build.AUDIO_MUTE_PROBE_SHA256,
+                   build_beam_audio_switch.DP_SHA256):
+        assert KNOWN_IMAGES[digest][0] == {0x0432}
+        assert all(image_approved(profile, digest) == (pid == 0x0432)
+                   for pid, profile in WRITE_PROFILES.items())
     assert plan_chunks(64) == [("START", START, 0, 42), ("START", START, 42, 64)]
     print("  -> Air/Air 2/Air 2 Pro exact SHA profiles match")
 

@@ -24,6 +24,20 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(info.models, {"air2pro"})
         self.check_app_retry(image, info)
 
+    def test_button_variants_retry_only_app_check_after_completed_transfer(self):
+        builder = mcu_flash.air2_build
+        immediate = builder.build_dp_first(self.baseline, immediate=True)
+        trace = builder.build_audio_trace(immediate, timed=True)
+        bridge = builder.build_audio_clock_mute(trace, bridge_trace=True)
+        for image in (builder.build_usb_to_dp_on_hold(bridge),
+                      builder.build_usb_to_dp_on_hold(bridge, stable=True),
+                      builder.build_audio_route_buttons(bridge),
+                      builder.build_audio_route_buttons(bridge, v2=True)):
+            with self.subTest(sha256=builder.sha256(image)):
+                info = mcu_flash.check_image(image)
+                self.assertEqual(info.models, {"air2pro"})
+                self.check_app_retry(image, info)
+
     def check_app_retry(self, image, info):
         model = self.app.model
         with (
